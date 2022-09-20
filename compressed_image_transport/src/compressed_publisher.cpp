@@ -38,7 +38,7 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <boost/make_shared.hpp>
-#include "compressed_image_transport/qoi.hpp"
+#include "compressed_image_transport/qoixx.hpp"
 
 #include "compressed_image_transport/compression_common.h"
 
@@ -251,21 +251,24 @@ void CompressedPublisher::publish(const sensor_msgs::Image& message, const Publi
         {
           boost::shared_ptr<CompressedPublisher> tracked_object;
           cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvShare(message, tracked_object, targetFormat.str());
+          const auto& mat = cv_ptr->image;
 
-          const std::size_t size = static_cast<std::size_t>(cv_ptr->image.rows) * static_cast<std::size_t>(cv_ptr->image.cols) * static_cast<std::size_t>(cv_ptr->image.channels());
-          std::vector<unsigned char> orig_pixels;
-          orig_pixels.resize(size);
-          std::memcpy(orig_pixels.data(), cv_ptr->image.data, size);
+          const auto qoi_desc = qoixx::qoi::desc{
+            .width = static_cast<std::uint32_t>(message.width),
+            .height = static_cast<std::uint32_t>(message.height),
+            .channels = static_cast<std::uint8_t>(channels),
+            .colorspace = qoixx::qoi::colorspace::srgb
+          };
+          const std::size_t size = static_cast<std::size_t>(qoi_desc.width) * static_cast<std::size_t>(qoi_desc.height) * static_cast<std::size_t>(qoi_desc.channels);
+          compressed.data = qoixx::qoi::encode<std::vector<uchar>>(mat.data, size, qoi_desc);
 
-          compressed.data = qoi::encode(orig_pixels,
-                                        cv_ptr->image.cols,
-                                        cv_ptr->image.rows,
-                                        cv_ptr->image.channels());
-
-          float cRatio = (float)(cv_ptr->image.rows * cv_ptr->image.cols * cv_ptr->image.elemSize())
-              / (float)compressed.data.size();
+          const float cRatio = (float)(mat.rows * mat.cols * mat.elemSize()) / (float)compressed.data.size();
           ROS_DEBUG("Compressed Image Transport - Codec: qoi, Compression Ratio: 1:%.2f (%lu bytes)", cRatio, compressed.data.size());
 
+        }
+        catch (std::invalid_argument& e){
+          ROS_ERROR("%s", e.what());
+          return;
         }
         catch (cv_bridge::Exception& e)
         {

@@ -37,7 +37,46 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
-#include "compressed_image_transport/qoi.hpp"
+#include "compressed_image_transport/qoixx.hpp"
+
+namespace qoixx
+{
+
+template<>
+struct container_operator<cv::Mat>{
+  using target_type = cv::Mat;
+  static inline target_type construct(std::size_t size){
+    target_type t(static_cast<int>(size), 1, CV_8U);
+    return t;
+  }
+  struct pusher{
+    static constexpr bool is_contiguous = true;
+    target_type* t;
+    std::uint8_t* ptr;
+    std::size_t i = 0;
+    inline void push(std::uint8_t x)noexcept{
+      ptr[i++] = static_cast<std::uint8_t>(x);
+    }
+    template<typename U>
+    inline void push(U t)noexcept{
+      this->push(static_cast<std::uint8_t>(t));
+    }
+    inline target_type finalize()noexcept{
+      return std::move(*t);
+    }
+    inline std::uint8_t* raw_pointer()noexcept{
+      return ptr+i;
+    }
+    inline void advance(std::size_t n)noexcept{
+      i += n;
+    }
+  };
+  static pusher create_pusher(target_type& t)noexcept{
+    return {&t, t.ptr()};
+  }
+};
+
+}
 
 #include "compressed_image_transport/compression_common.h"
 
@@ -103,19 +142,12 @@ void CompressedSubscriber::internalCallback(const sensor_msgs::CompressedImageCo
     
     if (compression_format == "qoi")
     {
-      auto header = qoi::get_header(message->data);
-      auto img_pixels = qoi::decode(message->data);
+      auto [img_pixels, header] = qoixx::qoi::decode<cv::Mat>(message->data);
 
       // QOI can only do 3 or 4 channels (RGB/RGBA)
-      cv_ptr->encoding = enc::RGB8;
-      if (header.channels == 4)
-        cv_ptr->encoding = enc::RGBA8;
+      cv_ptr->encoding = header.channels == 4 ? enc::RGBA8 : enc::RGB8;
 
-      // We need to make a copy or we get a black image TODO: remove this copy
-      cv::Mat(header.height,
-              header.width,
-              cv_bridge::getCvType(cv_ptr->encoding),
-              &img_pixels[0]).copyTo(cv_ptr->image);
+      cv_ptr->image = img_pixels.reshape(header.channels, header.height);
 
       // QOI uses RGB, transform to BGR
       if (header.channels == 3)
@@ -178,6 +210,10 @@ void CompressedSubscriber::internalCallback(const sensor_msgs::CompressedImageCo
           }
         }
       }
+  }
+  catch (std::invalid_argument& e)
+  {
+    ROS_ERROR("%s", e.what());
   }
   catch (cv::Exception& e)
   {
